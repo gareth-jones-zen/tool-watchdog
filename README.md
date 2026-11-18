@@ -33,6 +33,7 @@ no window, which the scheduled task runs.
 tool-watchdog check              every check, fresh or not (exit 1 if anything is stale)
     --problems                   only what's wrong
     --json                       as JSON
+    --brief                      a line for a session briefing: all fine, or the problems (one per line)
 tool-watchdog run                the scheduled pass (below)
     --now TIME                   check and run: as though it were TIME (yyyy-mm-ddThh:mm)
 tool-watchdog autostart on       run every few minutes, at logon and after unlocking: off, restart, status

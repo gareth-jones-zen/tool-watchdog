@@ -115,6 +115,7 @@ public sealed class WatchdogTests : IDisposable
             "ok    task   a watch: running, last run Wed 18 Nov 08:00\n" +
             "ok    task   b sync: ready, last run Wed 18 Nov 09:45\n", output);
         Assert.Equal("Everything is producing.\n", Run("check", "--problems").Out);
+        Assert.Equal("all 5 checks fine (outputs, watchers' logs, tasks)\n", Run("check", "--brief").Out);
     }
 
     [Fact]
@@ -166,6 +167,10 @@ public sealed class WatchdogTests : IDisposable
         var broken = Checks.Tasks(Config.Tasks!, now, _ => throw new InvalidOperationException("no COM"));
         Assert.Equal("couldn't read Task Scheduler: InvalidOperationException: no COM", Assert.Single(broken).Detail);
         Assert.Equal(1, Run("check").Code);
+        tasks["b sync"] = new("Disabled", null, 0);
+        Assert.Equal("2 problem(s); `tool-watchdog check` for every check\n" +
+                     "   STALE task   a watch: not registered (register.ps1)\n" +
+                     "   STALE task   b sync: disabled\n", Run("check", "--brief").Out);
     }
 
     [Fact]

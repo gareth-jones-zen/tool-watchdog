@@ -40,6 +40,7 @@ public static class Cli
         "    tool-watchdog check              every check, fresh or not (exit 1 if anything is stale)\n" +
         "        --problems                   only what's wrong\n" +
         "        --json                       as JSON\n" +
+        "        --brief                      a line for a session briefing: all fine, or the problems\n" +
         "    tool-watchdog run                the scheduled pass: inside the watched hours, raise each new problem once\n" +
         "                                     (a notification, and a review item), and mark cleared ones\n" +
         "        --now TIME                   check and run: as though it were TIME (yyyy-mm-ddThh:mm)\n" +
@@ -60,7 +61,7 @@ public static class Cli
         public string? Config;
         public string Command = "";
         public List<string> Args = [];
-        public bool Json, Problems;
+        public bool Json, Problems, Brief;
         public DateTime? Now;
     }
 
@@ -124,7 +125,9 @@ public static class Cli
     {
         var checks = Checks.Run(config, host.Now(), host.TaskInfo);
         var shown = options.Problems ? checks.Where(c => c.Stale).ToList() : checks;
-        if (options.Json)
+        if (options.Brief)
+            host.Out.Write(Brief(checks));
+        else if (options.Json)
             host.Out.WriteLine(ToJson(shown));
         else
         {
@@ -134,6 +137,19 @@ public static class Cli
                 host.Out.WriteLine("Everything is producing.");
         }
         return checks.Any(c => c.Stale) ? 1 : 0;
+    }
+
+    /// <summary>For a session briefing (0.2.0): "all 30 checks fine (outputs, watchers' logs, tasks)", or how many
+    /// problems and a line for each.</summary>
+    internal static string Brief(IReadOnlyList<Check> checks)
+    {
+        var stale = checks.Where(c => c.Stale).ToList();
+        if (stale.Count == 0)
+            return $"all {checks.Count(c => !c.Skipped)} checks fine (outputs, watchers' logs, tasks)\n";
+        var text = new StringBuilder($"{stale.Count} problem(s); `tool-watchdog check` for every check\n");
+        foreach (var check in stale)
+            text.Append("   ").Append(check.Line()).Append('\n');
+        return text.ToString();
     }
 
     internal static string ToJson(IEnumerable<Check> checks)
@@ -282,6 +298,9 @@ public static class Cli
                     break;
                 case ("check", "--problems"):
                     options.Problems = true;
+                    break;
+                case ("check", "--brief"):
+                    options.Brief = true;
                     break;
                 case ("check" or "run", "--now"):
                     string text;
