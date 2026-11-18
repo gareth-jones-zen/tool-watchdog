@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>tool-watchdog-background</AssemblyName>
+    <RootNamespace>ToolWatchdog</RootNamespace>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ToolWatchdog\ToolWatchdog.csproj" />
+  </ItemGroup>
+</Project>

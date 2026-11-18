@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/ToolWatchdog/ToolWatchdog.csproj" />
+  <Project Path="src/ToolWatchdog.Console/ToolWatchdog.Console.csproj" />
+  <Project Path="src/ToolWatchdog.Background/ToolWatchdog.Background.csproj" />
+
+  <Project Path="tests/ToolWatchdog.Tests/ToolWatchdog.Tests.csproj" />
+</Solution>
