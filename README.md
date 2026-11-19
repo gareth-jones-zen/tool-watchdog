@@ -10,7 +10,7 @@ you hear when something stops rather than whenever you next look.
 
 ```
 tool-watchdog check --problems
-STALE output Preps written: 3 working day(s) old (expected within 2)  [meeting-preps]
+STALE output Preps written: 3 working days old (expected within 2 working days)  [meeting-preps]
 STALE log    mail-triage: last logged Wed 18 Nov 09:12
 STALE task   team-leave sync: last run failed (0x1)
 ```
@@ -47,6 +47,9 @@ tool-watchdog config             create the settings file (if missing) and say w
 - **Only inside the watched hours** (`[schedule]`, Monday to Friday 08:00-19:00 by default). Outside them it checks
   nothing and exits at once, so the task can run every 15 minutes, all the time, at almost no cost, and you change
   the hours in the settings rather than re-registering the task.
+- **A problem is raised only once it's been seen on `confirm_runs` passes in a row** (default 2; 0.3.0). On waking,
+  every tool starts at once and the watchdog can look before the others have caught up, so one stale pass is a blip:
+  if it clears on the next pass, it was never raised. A real problem reaches you one pass later.
 - **A new problem is raised once:** one notification (several at once share it), and, with `[review]`, an item in a
   review queue (type `stale`, with the check's name, kind, tool and when it was first seen). While it lasts it isn't
   raised again. **When it clears, its item gets a `cleared` time**, so whoever reads the queue can say it recovered.
@@ -96,6 +99,7 @@ days = "Mon-Fri"                  # or "Mon, Wed, Fri", "Sat-Sun", "every day"
 hours = "08:00-19:00"
 every_minutes = 15                # autostart: how often run runs
 after_unlock_minutes = 1          # and this long after each unlock
+confirm_runs = 2                  # raise a problem once it's seen on this many passes in a row (1: at once)
 
 [review]                          # optional: where run puts its items (background-tools-lib's ReviewQueue)
 file = "%LOCALAPPDATA%/my-tools/review.json"

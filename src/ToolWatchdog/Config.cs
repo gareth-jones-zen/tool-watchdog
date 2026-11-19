@@ -71,7 +71,8 @@ public sealed partial class Config
         "# days = \"Mon-Fri\"\n" +
         "# hours = \"08:00-19:00\"\n" +
         "# every_minutes = 15             # autostart: how often `run` runs\n" +
-        "# after_unlock_minutes = 1       # and this long after each unlock (catches up after sleep)\n";
+        "# after_unlock_minutes = 1       # and this long after each unlock (catches up after sleep)\n" +
+        "# confirm_runs = 2               # `run` raises a problem only once it's been seen on this many runs in a row\n";
 
     public static readonly string[] KnownKeys =
         ["root", "output", "log", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
@@ -84,6 +85,10 @@ public sealed partial class Config
     public Window Window { get; init; } = Window.Default;
     public int EveryMinutes { get; init; } = 15;
     public int? AfterUnlockMinutes { get; init; } = 1;
+
+    /// <summary>`run` raises a problem only once it's been seen on this many runs in a row (0.3.0): a blip on waking,
+    /// when every tool starts at once and the watchdog can look before the others have caught up, doesn't notify.</summary>
+    public int ConfirmRuns { get; init; } = 2;
     public bool Notify { get; init; } = true;
     public required string StateFile { get; init; }
     public required string LogFile { get; init; }
@@ -255,11 +260,12 @@ public sealed partial class Config
         var window = Window.Default;
         var every = 15;
         int? unlock = 1;
+        var confirm = 2;
         if (raw.TryGetValue("schedule", out var s))
         {
             if (s is not TomlTable table)
                 throw new UsageException($"{full}: [schedule] should be a table.");
-            Strict(table, "[schedule]", "days", "hours", "every_minutes", "after_unlock_minutes");
+            Strict(table, "[schedule]", "days", "hours", "every_minutes", "after_unlock_minutes", "confirm_runs");
             var daysText = table.TryGetValue("days", out _) ? Text(table, "days", "[schedule]") : "Mon-Fri";
             var hoursText = table.TryGetValue("hours", out _) ? Text(table, "hours", "[schedule]") : "08:00-19:00";
             var m = HoursPattern().Match(hoursText);
@@ -276,6 +282,8 @@ public sealed partial class Config
                 every = e.Value >= 1 && e.Value == Math.Floor(e.Value) ? (int)e.Value : throw Bad("[schedule]", "every_minutes should be a whole number, 1 or more");
             if (Number(table, "after_unlock_minutes", "[schedule]") is { } u)
                 unlock = u.Value == Math.Floor(u.Value) ? (int)u.Value : throw Bad("[schedule]", "after_unlock_minutes should be a whole number");
+            if (Number(table, "confirm_runs", "[schedule]") is { } c)
+                confirm = c.Value >= 1 && c.Value == Math.Floor(c.Value) ? (int)c.Value : throw Bad("[schedule]", "confirm_runs should be a whole number, 1 or more");
         }
 
         ReviewSettings? review = null;
@@ -305,6 +313,7 @@ public sealed partial class Config
             Window = window,
             EveryMinutes = every,
             AfterUnlockMinutes = unlock,
+            ConfirmRuns = confirm,
             Notify = notify,
             StateFile = Top("state_file") is { } st ? Full(st) : System.IO.Path.Combine(Local(env), "state.json"),
             LogFile = Top("log_file") is { } log ? Full(log) : System.IO.Path.Combine(Local(env), "tool-watchdog.log"),

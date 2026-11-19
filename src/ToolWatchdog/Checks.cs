@@ -34,6 +34,16 @@ public sealed class Check
         return json;
     }
 
+    /// <summary>An age as hours and minutes (0.3.0; "1.1 hours" read oddly): "1h 03m", "45m", "26h 10m".</summary>
+    internal static string Age(TimeSpan age)
+    {
+        var minutes = Math.Max(0, (int)Math.Round(age.TotalMinutes));
+        return minutes >= 60 ? $"{minutes / 60}h {minutes % 60:00}m" : $"{minutes}m";
+    }
+
+    /// <summary>"1 hour", "2 hours", "1.5 hours": the settings' number as written, with its unit.</summary>
+    internal static string Plural(string number, string unit) => number == "1" ? $"1 {unit}" : $"{number} {unit}s";
+
     /// <summary>One line: "STALE output Preps written: 3 working day(s) old (expected within 2)  [meeting-preps]".</summary>
     public string Line()
     {
@@ -108,17 +118,17 @@ public static partial class Checks
             case "hours":
                 var hours = (now - newest).TotalHours;
                 check.Stale = hours > rule.Limit.Value;
-                check.Detail = $"{hours.ToString("F1", CultureInfo.InvariantCulture)} hours old (expected within {rule.Limit.Text})";
+                check.Detail = $"{Check.Age(now - newest)} old (expected within {Check.Plural(rule.Limit.Text, "hour")})";
                 break;
             case "working_days":
                 var working = WorkingDaysBetween(DateOnly.FromDateTime(newest), today);
                 check.Stale = working > rule.Limit.Value;
-                check.Detail = $"{working} working day(s) old (expected within {rule.Limit.Text})";
+                check.Detail = $"{Check.Plural(working.ToString(CultureInfo.InvariantCulture), "working day")} old (expected within {Check.Plural(rule.Limit.Text, "working day")})";
                 break;
             default:
                 var days = today.DayNumber - DateOnly.FromDateTime(newest).DayNumber;
                 check.Stale = days > rule.Limit.Value;
-                check.Detail = $"{days} day(s) old (expected within {rule.Limit.Text})";
+                check.Detail = $"{Check.Plural(days.ToString(CultureInfo.InvariantCulture), "day")} old (expected within {Check.Plural(rule.Limit.Text, "day")})";
                 break;
         }
         return check;

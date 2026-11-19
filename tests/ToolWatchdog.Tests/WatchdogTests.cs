@@ -108,8 +108,8 @@ public sealed class WatchdogTests : IDisposable
         var (code, output) = Run("check");
         Assert.Equal(0, code);
         Assert.Equal(
-            "ok    output Reports: 1 working day(s) old (expected within 2)\n" +
-            "ok    output Queue: 0.5 hours old (expected within 1)\n" +
+            "ok    output Reports: 1 working day old (expected within 2 working days)\n" +
+            "ok    output Queue: 30m old (expected within 1 hour)\n" +
             "-     output Later: not checked now (from 2026-12-01 until -)\n" +
             "ok    log    watcher: last logged Wed 18 Nov 09:00\n" +
             "ok    task   a watch: running, last run Wed 18 Nov 08:00\n" +
@@ -126,14 +126,14 @@ public sealed class WatchdogTests : IDisposable
         now = new DateTime(2026, 11, 20, 10, 0, 0);
         Assert.True(One("Reports").Stale);   // three working days after the 17th
         now = new DateTime(2026, 11, 22, 10, 0, 0);
-        Assert.Equal("3 working day(s) old (expected within 2)", One("Reports").Detail);   // the weekend doesn't count
+        Assert.Equal("3 working days old (expected within 2 working days)", One("Reports").Detail);   // the weekend doesn't count
     }
 
     [Fact]
     public void A_json_time_is_read_as_its_clock_says_and_nothing_found_is_stale()
     {
         now = new DateTime(2026, 11, 18, 11, 0, 0);
-        Assert.Equal(("1.5 hours old (expected within 1)", true), (One("Queue").Detail, One("Queue").Stale));
+        Assert.Equal(("1h 30m old (expected within 1 hour)", true), (One("Queue").Detail, One("Queue").Stale));
         File.WriteAllText(Path.Combine(dir, "data", "queue.json"), "not json");
         Assert.Equal(("nothing found", true), (One("Queue").Detail, One("Queue").Stale));
         now = new DateTime(2026, 12, 1, 10, 0, 0);
@@ -186,13 +186,17 @@ public sealed class WatchdogTests : IDisposable
     [Fact]
     public void Run_raises_a_new_problem_once_and_marks_it_cleared()
     {
-        now = new DateTime(2026, 11, 18, 11, 30, 0);   // the queue and the log have gone stale
+        now = new DateTime(2026, 11, 18, 11, 15, 0);   // the queue and the log have gone stale
+        Assert.Equal(0, Run("run").Code);
+        Assert.Empty(notified);                        // seen once: not yet (0.3.0, confirm_runs = 2)
+        Assert.Contains("(2 not yet confirmed)", File.ReadAllText(Path.Combine(dir, "watchdog.log")));
+        now = new DateTime(2026, 11, 18, 11, 30, 0);
         Assert.Equal(0, Run("run").Code);
         var (title, lines) = Assert.Single(notified);
         Assert.Equal("tool-watchdog: 2 new problems", title);
-        Assert.Equal(["Queue: 2.0 hours old (expected within 1)", "watcher: last logged Wed 18 Nov 09:00"], lines);
+        Assert.Equal(["Queue: 2h 00m old (expected within 1 hour)", "watcher: last logged Wed 18 Nov 09:00"], lines);
         var items = Config.Review!.Open().Items("watchdog");
-        Assert.Equal(["Queue: 2.0 hours old (expected within 1) [queuer]", "watcher: last logged Wed 18 Nov 09:00"],
+        Assert.Equal(["Queue: 2h 00m old (expected within 1 hour) [queuer]", "watcher: last logged Wed 18 Nov 09:00"],
             items.Select(i => (string?)i["title"]));
 
         now = now.AddMinutes(15);
@@ -207,6 +211,24 @@ public sealed class WatchdogTests : IDisposable
         Assert.Equal("2026-11-18T12:00:00", (string?)after.Single(i => (string?)i["name"] == "watcher")["cleared"]);
         Assert.Null(after.Single(i => (string?)i["name"] == "Queue")["cleared"]);
         Assert.Contains("cleared: watcher", File.ReadAllText(Path.Combine(dir, "watchdog.log")));
+    }
+
+    [Fact]
+    public void A_blip_that_clears_on_the_next_run_is_never_raised()
+    {
+        now = new DateTime(2026, 11, 18, 11, 15, 0);   // stale for one run, as on waking before the others catch up
+        Run("run");
+        File.WriteAllText(Path.Combine(dir, "data", "queue.json"), "{\"checked\": \"2026-11-18T11:25:00\"}");
+        File.AppendAllText(Path.Combine(dir, "data", "watcher.log"), "2026-11-18 11:25:00  alive\n");
+        now = new DateTime(2026, 11, 18, 11, 30, 0);
+        Run("run");
+        Assert.Empty(notified);
+        Assert.Empty(Config.Review!.Open().Items("watchdog"));
+
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + "\n[schedule]\nconfirm_runs = 1\n");
+        now = new DateTime(2026, 11, 18, 13, 0, 0);
+        Run("run");
+        Assert.Single(notified);                        // confirm_runs = 1: the first sighting, as before 0.3.0
     }
 
     [Fact]
@@ -226,6 +248,8 @@ public sealed class WatchdogTests : IDisposable
         File.AppendAllText(Path.Combine(dir, "config.toml"), "\n");
         var text = File.ReadAllText(Path.Combine(dir, "config.toml")).Replace("log_file = \"watchdog.log\"", "log_file = \"watchdog.log\"\nnotify = false");
         File.WriteAllText(Path.Combine(dir, "config.toml"), text);
+        now = new DateTime(2026, 11, 18, 11, 15, 0);
+        Run("run");
         now = new DateTime(2026, 11, 18, 11, 30, 0);
         Run("run");
         Assert.Empty(notified);
