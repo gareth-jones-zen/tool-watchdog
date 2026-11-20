@@ -145,6 +145,29 @@ STALE size   Rules: 41 lines, 31,200 characters in 3 files (budget 15,000 charac
 - **No file matching is fine** unless `required = true`: a budget can be set for files that don't exist yet.
 - `--json` adds `lines`, `chars` and `files` (as shown, relative to `root`) to a size check.
 
+### Working files' ages: `[[age]]` (0.5.0)
+
+Tools that download or save things to work on (receipts, emails handed to a handler, screenshots) should tidy them away
+themselves once they're done with them, since only the tool knows when that is. An `[[age]]` is the safety net: it
+**warns** when anything there is older than it should be, and **never deletes**.
+
+```toml
+[[age]]
+name = "Claim documents"
+tool = "people-first-approvals"          # optional: named in the warning
+files = "%LOCALAPPDATA%/my-tools/documents/*"   # one pattern or a list; ** is any depth of folders
+days = 30
+```
+
+```
+ok    age    Claim documents: 2 there, the oldest 3d (limit 30 days)
+STALE age    Claim documents: 1 of 3 older than 30 days: documents\abc (41d): is people-first-approvals tidying up?
+```
+
+- **A match may be a file or a folder; a folder is as old as the newest file in it** (its own time if empty), so a
+  folder still being worked in isn't old.
+- **Nothing there is fine.** A crossed limit is a problem like any other: `check` shows it, and `run` raises it once.
+
 ## Building
 
 You need the .NET 11 SDK (`global.json` pins the feature band). Native AOT publishing also needs the Visual Studio C++
