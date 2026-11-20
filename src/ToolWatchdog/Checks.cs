@@ -20,6 +20,11 @@ public sealed class Check
     public string? File { get; set; }
     public string Detail { get; set; } = "";
 
+    /// <summary>A size check's measure (0.4.0): lines and characters across its files, and the files, as shown.</summary>
+    public long? Lines { get; set; }
+    public long? Chars { get; set; }
+    public IReadOnlyList<string>? Files { get; set; }
+
     /// <summary>The key a problem is remembered by between runs.</summary>
     public string Key => $"{Kind}|{Name}";
 
@@ -30,6 +35,12 @@ public sealed class Check
             json["newest"] = Newest is { } n ? n.ToString("yyyy-MM-ddTHH:mm", CultureInfo.InvariantCulture) : null;
         if (File is not null)
             json["file"] = File;
+        if (Kind == "size")
+        {
+            json["lines"] = Lines;
+            json["chars"] = Chars;
+            json["files"] = new JsonArray([.. (Files ?? []).Select(f => (JsonNode?)f)]);
+        }
         json["detail"] = Detail;
         return json;
     }
@@ -67,11 +78,12 @@ public static partial class Checks
     [GeneratedRegex(@"(20\d{2})-(\d{2})(?:-(\d{2}))?", RegexOptions.CultureInvariant)]
     private static partial Regex NameDate();
 
-    /// <summary>Every check, in the settings' order: outputs, logs, then tasks.</summary>
+    /// <summary>Every check, in the settings' order: outputs, logs, sizes, then tasks.</summary>
     public static List<Check> Run(Config config, DateTime now, Func<IReadOnlyList<string>, IReadOnlyDictionary<string, TaskInfo>> taskInfo)
     {
         var checks = config.Outputs.Select(r => Output(config, r, now)).ToList();
         checks.AddRange(config.Logs.Select(r => Log(config, r, now)));
+        checks.AddRange(config.Sizes.Select(r => Size(config, r)));
         if (config.Tasks is { Names.Count: > 0 } tasks)
             checks.AddRange(Tasks(tasks, now, taskInfo));
         return checks;
@@ -142,7 +154,7 @@ public static partial class Checks
     public static (DateTime? When, string? Path) Newest(OutputRule rule)
     {
         (DateTime When, string Path)? best = null;
-        foreach (var file in rule.Files.SelectMany(Glob))
+        foreach (var file in rule.Files.SelectMany(p => Glob(p)))
         {
             DateTime? when = null;
             if (rule.Date == "name")
@@ -187,13 +199,94 @@ public static partial class Checks
         }
     }
 
+    // ---- sizes ----------------------------------------------------------------------------------------------------
+
+    /// <summary>A [[size]] (0.4.0): the files' lines and characters against the budgets. Line endings are counted as
+    /// one character whatever the file uses (so a checkout's CRLF doesn't change the count), and a BOM isn't counted.
+    /// A file matched by two patterns counts once.</summary>
+    public static Check Size(Config config, SizeRule rule)
+    {
+        var check = new Check { Kind = "size", Name = rule.Name };
+        var files = rule.Files.SelectMany(p => Glob(p, recursive: true)).Where(System.IO.File.Exists)
+            .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(f => (Full: f, Shown: Shown(config, f))).OrderBy(f => f.Shown, StringComparer.OrdinalIgnoreCase).ToList();
+        var budget = Budget(rule);
+        check.Files = files.Select(f => f.Shown).ToList();
+        if (files.Count == 0)
+        {
+            check.Stale = rule.Required;
+            check.Detail = rule.Required ? "nothing found" : $"no files yet ({budget})";
+            return check;
+        }
+        var measured = new List<(string Shown, long Lines, long Chars)>();
+        foreach (var (full, shown) in files)
+        {
+            try
+            {
+                var (lines, chars) = Measure(System.IO.File.ReadAllText(full, Encoding.UTF8));
+                measured.Add((shown, lines, chars));
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                check.Stale = true;
+                check.Detail = $"couldn't read {shown}: {error.Message}";
+                return check;
+            }
+        }
+        var (totalLines, totalChars) = (measured.Sum(m => m.Lines), measured.Sum(m => m.Chars));
+        check.Lines = totalLines;
+        check.Chars = totalChars;
+        var detail = $"{Check.Plural(N(totalLines), "line")}, {Check.Plural(N(totalChars), "character")}" +
+                     (files.Count > 1 ? $" in {files.Count} files" : "") + $" ({budget})";
+        var over = new List<string>();
+        if (rule.TotalLines is { } maxLines && totalLines > maxLines)
+            over.Add(Check.Plural(N(totalLines - maxLines), "line"));
+        if (rule.TotalChars is { } maxChars && totalChars > maxChars)
+            over.Add(Check.Plural(N(totalChars - maxChars), "character"));
+        var problems = new List<string>();
+        if (over.Count > 0)
+            problems.Add("over by " + string.Join(" and ", over));
+        if (rule.EachChars is { } maxEach && measured.Where(m => m.Chars > maxEach).ToList() is { Count: > 0 } big)
+            problems.Add($"over {N(maxEach)} each: " + string.Join(", ", big.Select(m => $"{m.Shown} ({N(m.Chars)})")));
+        check.Stale = problems.Count > 0;
+        check.Detail = problems.Count > 0 ? $"{detail}: {string.Join("; ", problems)}" : detail;
+        return check;
+    }
+
+    /// <summary>"budget 200 lines, 20,000", "budget 20,000 characters", "budget 200 lines, 15,000 each".</summary>
+    internal static string Budget(SizeRule rule)
+    {
+        var parts = new List<string>();
+        if (rule.TotalLines is { } lines)
+            parts.Add(Check.Plural(N(lines), "line"));
+        if (rule.TotalChars is { } chars)
+            parts.Add(parts.Count > 0 ? N(chars) : Check.Plural(N(chars), "character"));
+        if (rule.EachChars is { } each)
+            parts.Add(parts.Count > 0 ? $"{N(each)} each" : $"{Check.Plural(N(each), "character")} each");
+        return "budget " + string.Join(", ", parts);
+    }
+
+    /// <summary>A text's lines (a last line without a newline counts; an empty text has none) and characters, with
+    /// CRLF and CR as one, and without a BOM.</summary>
+    internal static (long Lines, long Chars) Measure(string text)
+    {
+        if (text.StartsWith('﻿'))
+            text = text[1..];
+        text = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var lines = text.Length == 0 ? 0 : text.Count(c => c == '\n') + (text.EndsWith('\n') ? 0 : 1);
+        return (lines, text.Length);
+    }
+
+    private static string N(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
+
     // ---- glob -----------------------------------------------------------------------------------------------------
 
-    /// <summary>Files matching a pattern, as Python's glob.glob (not recursive): * and ? within one folder level,
-    /// matching ignoring case; a wildcard skips names starting with "." unless it starts with one; folders in the
-    /// middle of a pattern must be folders; the order is the file system's. The parts without wildcards are kept as
-    /// written, so "..\x" stays in the result.</summary>
-    public static IEnumerable<string> Glob(string pattern)
+    /// <summary>Files matching a pattern, as Python's glob.glob: * and ? within one folder level, matching ignoring
+    /// case; a wildcard skips names starting with "." unless it starts with one; folders in the middle of a pattern
+    /// must be folders; the order is the file system's. The parts without wildcards are kept as written, so "..\x"
+    /// stays in the result. With recursive (as recursive=True), a ** part is this folder and every folder below it,
+    /// skipping hidden ones; without it, ** is the same as *.</summary>
+    public static IEnumerable<string> Glob(string pattern, bool recursive = false)
     {
         var root = Path.GetPathRoot(pattern) ?? "";
         var parts = pattern[root.Length..].Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
@@ -204,6 +297,11 @@ public static partial class Checks
         {
             var part = parts[i];
             var last = i == parts.Length - 1;
+            if (recursive && part == "**")
+            {
+                found = found.SelectMany(folder => (IEnumerable<string>)[folder, .. Below(folder, last)]).ToList();
+                continue;
+            }
             if (!HasMagic(part))
             {
                 found = found.Select(f => Join(f, part)).Where(p => last ? System.IO.File.Exists(p) || Directory.Exists(p) : Directory.Exists(p)).ToList();
@@ -231,6 +329,38 @@ public static partial class Checks
             }).ToList();
         }
         return found;
+    }
+
+    /// <summary>Every folder below a folder (and with files, every file too), skipping hidden names, as ** finds them.</summary>
+    private static List<string> Below(string folder, bool files)
+    {
+        var at = folder.Length == 0 ? "." : folder;
+        var result = new List<string>();
+        if (!Directory.Exists(at))
+            return result;
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(at))
+            {
+                var name = Path.GetFileName(entry);
+                if (name.StartsWith('.'))
+                    continue;
+                var path = Join(folder, name);
+                if (Directory.Exists(entry))
+                {
+                    result.Add(path);
+                    // not into a junction or link: one pointing back up would never end
+                    if (!System.IO.File.GetAttributes(entry).HasFlag(FileAttributes.ReparsePoint))
+                        result.AddRange(Below(path, files));
+                }
+                else if (files)
+                    result.Add(path);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+        }
+        return result;
     }
 
     private static bool HasMagic(string part) => part.IndexOfAny(['*', '?', '[']) >= 0;

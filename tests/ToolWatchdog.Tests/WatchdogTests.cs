@@ -320,6 +320,143 @@ public sealed class WatchdogTests : IDisposable
         Assert.Empty(Checks.Glob(Path.Combine(dir, "repo", "reports", "missing.md")));
     }
 
+    // ---- sizes (0.4.0) ----------------------------------------------------------------------------------------------
+
+    private const string SizeSettings = """
+
+        [[size]]
+        name = "Always"
+        files = ["repo/docs/*.md", "repo/docs/A.md"]
+        total_lines = 3
+        total_chars = 10
+
+        [[size]]
+        name = "Rules"
+        files = "repo/rules/**/*.md"
+        each_chars = 5
+
+        [[size]]
+        name = "Not yet"
+        files = "repo/none/**/*.md"
+        total_chars = 100
+        """;
+
+    private void WithSizes(string extra = "")
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + SizeSettings + "\n" + extra + "\n");
+        Directory.CreateDirectory(Path.Combine(dir, "repo", "docs"));
+        Directory.CreateDirectory(Path.Combine(dir, "repo", "rules", "x", "y"));
+        Directory.CreateDirectory(Path.Combine(dir, "repo", "rules", ".hidden"));
+        File.WriteAllText(Path.Combine(dir, "repo", "docs", "A.md"), "﻿one\r\ntwo\r\n", new System.Text.UTF8Encoding(true));
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", "top.md"), "12345\n");
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", "x", "y", "r.md"), "abc");
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", ".hidden", "h.md"), "a long hidden file, not counted");
+    }
+
+    [Fact]
+    public void A_size_within_budget_is_ok_counting_each_file_once_and_line_endings_as_one()
+    {
+        WithSizes();
+        var always = One("Always");
+        Assert.Equal(("2 lines, 8 characters (budget 3 lines, 10)", false), (always.Detail, always.Stale));
+        Assert.Equal([Path.Combine("docs", "A.md")], always.Files);
+        Assert.Equal("ok    size   Always: 2 lines, 8 characters (budget 3 lines, 10)", always.Line());
+    }
+
+    [Fact]
+    public void Doublestar_reaches_any_depth_skipping_hidden_folders_and_each_chars_names_the_files_over()
+    {
+        WithSizes();
+        var rules = One("Rules");
+        Assert.Equal([Path.Combine("rules", "top.md"), Path.Combine("rules", "x", "y", "r.md")], rules.Files);
+        Assert.True(rules.Stale);
+        Assert.Equal($"2 lines, 9 characters in 2 files (budget 5 characters each): over 5 each: {Path.Combine("rules", "top.md")} (6)", rules.Detail);
+        Assert.Empty(Checks.Glob(Path.Combine(dir, "repo", "rules", "**", "r.md")));   // not recursive: ** is *
+    }
+
+    [Fact]
+    public void A_size_over_its_totals_says_by_how_much()
+    {
+        WithSizes();
+        File.WriteAllText(Path.Combine(dir, "repo", "docs", "B.md"), "1\n2\n3\n");
+        var always = One("Always");
+        Assert.True(always.Stale);
+        Assert.Equal("5 lines, 14 characters in 2 files (budget 3 lines, 10): over by 2 lines and 4 characters", always.Detail);
+        Assert.Equal((5L, 14L), (always.Lines!.Value, always.Chars!.Value));
+    }
+
+    [Fact]
+    public void No_files_is_fine_unless_required()
+    {
+        WithSizes();
+        Assert.Equal(("no files yet (budget 100 characters)", false), (One("Not yet").Detail, One("Not yet").Stale));
+        WithSizes("required = true");   // appended to the last [[size]], Not yet
+        Assert.Equal(("nothing found", true), (One("Not yet").Detail, One("Not yet").Stale));
+    }
+
+    [Fact]
+    public void Sizes_are_in_check_json_and_brief()
+    {
+        WithSizes();
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", "top.md"), "1234\n");
+        Assert.Equal("all 8 checks fine (outputs, watchers' logs, tasks, sizes)\n", Run("check", "--brief").Out);
+        var json = JsonNode.Parse(Run("check", "--json").Out)!.AsArray();
+        var always = json.Single(j => (string?)j!["name"] == "Always")!.AsObject();
+        Assert.Equal(["kind", "name", "tool", "stale", "skipped", "lines", "chars", "files", "detail"], always.Select(kv => kv.Key));
+        Assert.Equal((2L, 8L), ((long)always["lines"]!, (long)always["chars"]!));
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", "top.md"), "123456\n");
+        var (code, output) = Run("check", "--problems");
+        Assert.Equal(1, code);
+        Assert.StartsWith("STALE size   Rules: ", output);
+    }
+
+    [Fact]
+    public void Run_raises_a_size_problem_once_confirmed_and_clears_it()
+    {
+        WithSizes();   // Rules is over its each_chars
+        Run("run");
+        Assert.Empty(notified);
+        now = now.AddMinutes(15);
+        Run("run");
+        var (title, lines) = Assert.Single(notified);
+        Assert.Equal("tool-watchdog: 1 new problem", title);
+        Assert.StartsWith("Rules: 2 lines, 9 characters", Assert.Single(lines));
+        var item = Assert.Single(Config.Review!.Open().Items("watchdog"));
+        Assert.Equal(("size", "Rules"), ((string?)item["kind"], (string?)item["name"]));
+
+        File.WriteAllText(Path.Combine(dir, "repo", "rules", "top.md"), "1234\n");
+        now = now.AddMinutes(15);
+        Run("run");
+        Assert.NotNull(Assert.Single(Config.Review!.Open().Items("watchdog"))["cleared"]);
+        Assert.Single(notified);
+    }
+
+    [Theory]
+    [InlineData("[[size]]\nname = \"x\"\nfiles = \"a\"", "needs a budget")]
+    [InlineData("[[size]]\nname = \"x\"\ntotal_chars = 10", "needs files")]
+    [InlineData("[[size]]\nname = \"x\"\nfiles = \"a\"\ntotal_lines = 1.5", "total_lines should be a whole number")]
+    [InlineData("[[size]]\nname = \"x\"\nfiles = \"a\"\neach_chars = 0", "each_chars should be a whole number, 1 or more")]
+    [InlineData("[[size]]\nname = \"x\"\nfiles = \"a\"\neach_chars = 5\nrequired = \"yes\"", "required should be true or false")]
+    [InlineData("[[size]]\nname = \"x\"\nfiles = \"a\"\neach_chars = 5\nhours = 1", "unknown setting 'hours'")]
+    [InlineData("[[size]]\nfiles = \"a\"\neach_chars = 5", "needs name")]
+    [InlineData("[size]\nname = \"x\"", "size should be [[size]] tables")]
+    public void Size_settings_are_read_strictly(string extra, string message)
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), extra + "\n");
+        var output = new StringWriter();
+        Assert.Equal(2, Cli.Run(["--config", Path.Combine(dir, "config.toml"), "check"], Host(output)));
+        Assert.Contains(message, output.ToString());
+    }
+
+    [Fact]
+    public void Measure_counts_lines_and_characters()
+    {
+        Assert.Equal((0L, 0L), Checks.Measure(""));
+        Assert.Equal((1L, 3L), Checks.Measure("abc"));
+        Assert.Equal((2L, 4L), Checks.Measure("a\r\nb\n"));
+        Assert.Equal((2L, 3L), Checks.Measure("﻿a\rb"));
+    }
+
     [Fact]
     public void Working_days_count_weekdays_after_the_start()
     {

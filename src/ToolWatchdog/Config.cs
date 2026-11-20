@@ -25,6 +25,12 @@ public sealed record LogRule(string Name, string File, double Hours);
 /// <summary>[tasks]: scheduled tasks that must exist, be enabled, and have run within so many days without failing.</summary>
 public sealed record TasksRule(IReadOnlyList<string> Names, int Days, string? RegisterHint);
 
+/// <summary>A [[size]] (0.4.0): files that must stay within a budget, in lines and characters across them all, and in
+/// characters for any one of them. Each budget is optional, but at least one is given. Files are globs, and ** matches
+/// any depth of folders. No file matching is a problem only when Required.</summary>
+public sealed record SizeRule(string Name, IReadOnlyList<string> Files, long? TotalLines, long? TotalChars, long? EachChars,
+    bool Required);
+
 /// <summary>[schedule]: the hours and days that count as watched. A log is judged only inside them, and `run` (the
 /// scheduled pass) does nothing outside them.</summary>
 public sealed record Window(IReadOnlySet<DayOfWeek> Days, TimeOnly Start, TimeOnly End, string Text)
@@ -63,6 +69,13 @@ public sealed partial class Config
         "# name = \"my-watcher\"\n" +
         "# file = \"%LOCALAPPDATA%/my-tool/my-tool.log\"\n" +
         "\n" +
+        "# [[size]]                       # files that must stay within a budget\n" +
+        "# name = \"Instructions\"\n" +
+        "# files = [\"docs/*.md\", \"rules/**/*.md\"]   # one pattern or a list; ** is any depth of folders\n" +
+        "# total_lines = 200              # all the files together (each budget is optional)\n" +
+        "# total_chars = 20000\n" +
+        "# each_chars = 15000             # any one file\n" +
+        "\n" +
         "# [tasks]                        # scheduled tasks: there, enabled, run lately, last run not failed\n" +
         "# names = [\"my-tool watch\"]\n" +
         "# days = 14\n" +
@@ -75,12 +88,13 @@ public sealed partial class Config
         "# confirm_runs = 2               # `run` raises a problem only once it's been seen on this many runs in a row\n";
 
     public static readonly string[] KnownKeys =
-        ["root", "output", "log", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
+        ["root", "output", "log", "size", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
 
     public required string Path { get; init; }
     public required string Root { get; init; }
     public IReadOnlyList<OutputRule> Outputs { get; init; } = [];
     public IReadOnlyList<LogRule> Logs { get; init; } = [];
+    public IReadOnlyList<SizeRule> Sizes { get; init; } = [];
     public TasksRule? Tasks { get; init; }
     public Window Window { get; init; } = Window.Default;
     public int EveryMinutes { get; init; } = 15;
@@ -244,6 +258,31 @@ public sealed partial class Config
                 Number(table, "hours", where)?.Value ?? 2));
         }
 
+        var sizes = new List<SizeRule>();
+        foreach (var table in Tables("size"))
+        {
+            var where = $"[[size]] {(table.TryGetValue("name", out var n) ? n : "(no name)")}";
+            Strict(table, where, "name", "files", "total_lines", "total_chars", "each_chars", "required");
+            var files = table.TryGetValue("files", out var f)
+                ? f switch
+                {
+                    string { Length: > 0 } one => [one],
+                    TomlArray many when many.Count > 0 && many.All(x => x is string { Length: > 0 }) => many.Cast<string>().ToList(),
+                    _ => throw Bad(where, "files should be a pattern or a list of them"),
+                }
+                : throw Bad(where, "needs files");
+            long? Budget(string key) => Number(table, key, where) is { } b
+                ? b.Value >= 1 && b.Value == Math.Floor(b.Value) ? (long)b.Value : throw Bad(where, $"{key} should be a whole number, 1 or more")
+                : null;
+            var (lines, chars, each) = (Budget("total_lines"), Budget("total_chars"), Budget("each_chars"));
+            if (lines is null && chars is null && each is null)
+                throw Bad(where, "needs a budget: total_lines, total_chars or each_chars");
+            var required = table.TryGetValue("required", out var req)
+                ? req is bool rb ? rb : throw Bad(where, "required should be true or false")
+                : false;
+            sizes.Add(new SizeRule(Text(table, "name", where, required: true), files.Select(Resolve).ToList(), lines, chars, each, required));
+        }
+
         TasksRule? tasks = null;
         if (raw.TryGetValue("tasks", out var t))
         {
@@ -309,6 +348,7 @@ public sealed partial class Config
             Root = Top("root") is { } root ? Full(root) : dir,
             Outputs = outputs,
             Logs = logs,
+            Sizes = sizes,
             Tasks = tasks,
             Window = window,
             EveryMinutes = every,

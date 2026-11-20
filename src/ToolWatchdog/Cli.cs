@@ -36,7 +36,7 @@ public static class Cli
     public const string Help =
         Usage + "\n\n" +
         "tool-watchdog: are the tools that run by themselves still producing what they should? It checks their products\n" +
-        "(the newest file, and how fresh), their logs, and their scheduled tasks.\n\n" +
+        "(the newest file, and how fresh), their logs, and their scheduled tasks; and that files stay within a size budget.\n\n" +
         "    tool-watchdog check              every check, fresh or not (exit 1 if anything is stale)\n" +
         "        --problems                   only what's wrong\n" +
         "        --json                       as JSON\n" +
@@ -139,13 +139,14 @@ public static class Cli
         return checks.Any(c => c.Stale) ? 1 : 0;
     }
 
-    /// <summary>For a session briefing (0.2.0): "all 30 checks fine (outputs, watchers' logs, tasks)", or how many
-    /// problems and a line for each.</summary>
+    /// <summary>For a session briefing (0.2.0): "all 30 checks fine (outputs, watchers' logs, tasks)", with ", sizes"
+    /// when there are size checks (0.4.0), or how many problems and a line for each.</summary>
     internal static string Brief(IReadOnlyList<Check> checks)
     {
         var stale = checks.Where(c => c.Stale).ToList();
         if (stale.Count == 0)
-            return $"all {checks.Count(c => !c.Skipped)} checks fine (outputs, watchers' logs, tasks)\n";
+            return $"all {checks.Count(c => !c.Skipped)} checks fine (outputs, watchers' logs, tasks" +
+                   (checks.Any(c => c.Kind == "size") ? ", sizes" : "") + ")\n";
         var text = new StringBuilder($"{stale.Count} problem(s); `tool-watchdog check` for every check\n");
         foreach (var check in stale)
             text.Append("   ").Append(check.Line()).Append('\n');

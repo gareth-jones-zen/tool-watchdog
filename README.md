@@ -5,7 +5,8 @@ Are the tools that run by themselves still producing what they should?
 A line in a log saying "alive" proves a watcher is running, not that anything comes out of it. tool-watchdog checks
 the products themselves (the newest report filed, the latest prep written, the queue a triage run stamps), and how
 fresh each should be; that each watcher has logged lately; and that each scheduled task is there, enabled, run lately
-and not failing. On a schedule, it raises each new problem once, as a notification and an item in a review queue, so
+and not failing; and that files meant to stay small (instruction files an AI agent loads, say) are within their
+budgets. On a schedule, it raises each new problem once, as a notification and an item in a review queue, so
 you hear when something stops rather than whenever you next look.
 
 ```
@@ -13,6 +14,7 @@ tool-watchdog check --problems
 STALE output Preps written: 3 working days old (expected within 2 working days)  [meeting-preps]
 STALE log    mail-triage: last logged Wed 18 Nov 09:12
 STALE task   team-leave sync: last run failed (0x1)
+STALE size   Instructions: 212 lines, 21,400 characters in 2 files (budget 200 lines, 20,000): over by 12 lines and 1,400 characters
 ```
 
 Windows only (Task Scheduler, notifications). Built in .NET 11 with Native AOT: no runtime to install.
@@ -89,6 +91,14 @@ name = "mail-triage"
 file = "%LOCALAPPDATA%/my-tools/mail-triage.log"
 hours = 2                         # how long it may be quiet within the watched hours (default 2)
 
+[[size]]                          # files that must stay within a budget (0.4.0; see below)
+name = "Instructions"
+files = ["CLAUDE.md", "rules/**/*.md"] # one pattern or a list, relative to this file; ** is any depth of folders
+total_lines = 200                 # all the matched files together; each budget is optional, but give one
+total_chars = 20000
+each_chars = 15000                # any one file
+required = false                  # true: no file matching is a problem (default false)
+
 [tasks]                           # scheduled tasks: there, enabled, run within `days`, last run not failed
 names = ["mail-triage watch", "team-leave sync"]
 days = 14
@@ -112,6 +122,28 @@ of 0x41301 (running), 0x41303 (never run) or 0x41306 (stopped by a restart) isn'
 **`base`:** several tools built on the shared library can keep their common settings in one file. Its `[paths]` are
 variables for this file's paths (`%EA_LOCAL%`), and a table such as `[review]` applies only if this file has that
 section too, its own keys winning. The loader is background-tools-lib's `PyCompat.BaseSettings`.
+
+### Size budgets: `[[size]]`
+
+Some files only work while they stay small: the instructions an AI agent loads at the start of every session, for
+example, where each line costs attention and context. A `[[size]]` gives a set of files a budget, and a crossed budget
+is a problem like any other: `check` shows it, and `run` raises it once (after `confirm_runs` passes), with a review
+item that's marked cleared when the files are back within it.
+
+```
+ok    size   Always loaded: 182 lines, 19,400 characters in 2 files (budget 200 lines, 20,000)
+STALE size   Rules: 41 lines, 31,200 characters in 3 files (budget 15,000 characters each): over 15,000 each: rules\api.md (16,100)
+```
+
+- **`total_lines` and `total_chars`** are for all the matched files together; **`each_chars`** is for any one of
+  them, and a crossed one names the files over it. Give any of the three, but at least one.
+- **`files`** are patterns relative to the settings file. **`**` matches any depth of folders** (including none),
+  skipping hidden folders below it; it doesn't follow junctions or links. A file
+  matched by two patterns counts once.
+- **Counting:** a line ending (CRLF, LF or CR) is one character, so a checkout's line endings don't change the count,
+  and a byte-order mark isn't counted. A last line without a newline still counts as a line.
+- **No file matching is fine** unless `required = true`: a budget can be set for files that don't exist yet.
+- `--json` adds `lines`, `chars` and `files` (as shown, relative to `root`) to a size check.
 
 ## Building
 
