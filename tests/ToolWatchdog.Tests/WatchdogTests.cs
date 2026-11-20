@@ -465,6 +465,73 @@ public sealed class WatchdogTests : IDisposable
         Assert.Equal(5, Checks.WorkingDaysBetween(new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 23)));
     }
 
+    // ---- ages (0.5.0) ---------------------------------------------------------------------------------------------
+
+    private const string AgeSettings = """
+
+        [[age]]
+        name = "Documents"
+        tool = "claims"
+        files = "work/documents/*"
+        days = 30
+
+        [[age]]
+        name = "Shots"
+        files = ["work/shots/*.png", "work/none/*"]
+        days = 7
+        """;
+
+    private void WithAges()
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + AgeSettings + Environment.NewLine);
+        var docs = Path.Combine(dir, "work", "documents");
+        var old = Directory.CreateDirectory(Path.Combine(docs, "old")).FullName;
+        File.WriteAllText(Path.Combine(old, "a.pdf"), "x");
+        File.SetLastWriteTime(Path.Combine(old, "a.pdf"), now.AddDays(-40));
+        var busy = Directory.CreateDirectory(Path.Combine(docs, "busy")).FullName;
+        File.WriteAllText(Path.Combine(busy, "a.pdf"), "x");
+        File.SetLastWriteTime(Path.Combine(busy, "a.pdf"), now.AddDays(-40));
+        File.WriteAllText(Path.Combine(busy, "reply.md"), "x");
+        File.SetLastWriteTime(Path.Combine(busy, "reply.md"), now.AddDays(-2));
+        var shots = Directory.CreateDirectory(Path.Combine(dir, "work", "shots")).FullName;
+        File.WriteAllText(Path.Combine(shots, "s.png"), "x");
+        File.SetLastWriteTime(Path.Combine(shots, "s.png"), now.AddDays(-3));
+    }
+
+    [Fact]
+    public void An_age_check_warns_of_old_files_and_a_folder_is_as_old_as_its_newest_file()
+    {
+        WithAges();
+        var documents = One("Documents");
+        Assert.True(documents.Stale);
+        Assert.StartsWith("1 of 2 older than 30 days: ", documents.Detail);
+        Assert.EndsWith($"{Path.Combine("work", "documents", "old")} (40d): is claims tidying up?", documents.Detail);
+        var shots = One("Shots");
+        Assert.False(shots.Stale);
+        Assert.Equal("1 there, the oldest 3d (limit 7 days)", shots.Detail);
+        Assert.True(Directory.Exists(Path.Combine(dir, "work", "documents", "old")));   // warns only: nothing deleted
+    }
+
+    [Fact]
+    public void Nothing_there_is_fine_and_ages_show_in_the_brief()
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + AgeSettings + Environment.NewLine);
+        Assert.Equal(("nothing there (limit 30 days)", false), (One("Documents").Detail, One("Documents").Stale));
+        Assert.Contains("tasks, working files' ages)", Run("check", "--brief").Out);
+    }
+
+    [Theory]
+    [InlineData("name = 'x'|files = 'a'", "needs days")]
+    [InlineData("name = 'x'|days = 3", "needs files")]
+    [InlineData("name = 'x'|files = 'a'|days = 0", "days should be a whole number, 1 or more")]
+    [InlineData("name = 'x'|files = 'a'|days = 3|hours = 1", "unknown setting 'hours'")]
+    public void Age_settings_are_read_strictly(string lines, string message)
+    {
+        var toml = string.Join(Environment.NewLine, ["", "[[age]]", .. lines.Split('|'), ""]);
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + toml);
+        Assert.Contains(message, Assert.Throws<UsageException>(() => Config).Message);
+    }
+
     private sealed class FakeTask : ITask
     {
         public List<(string Exe, IReadOnlyList<string> Args, TaskSchedule Schedule)> Enabled { get; } = [];

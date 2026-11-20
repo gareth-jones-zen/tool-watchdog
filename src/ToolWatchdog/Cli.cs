@@ -146,7 +146,8 @@ public static class Cli
         var stale = checks.Where(c => c.Stale).ToList();
         if (stale.Count == 0)
             return $"all {checks.Count(c => !c.Skipped)} checks fine (outputs, watchers' logs, tasks" +
-                   (checks.Any(c => c.Kind == "size") ? ", sizes" : "") + ")\n";
+                   (checks.Any(c => c.Kind == "size") ? ", sizes" : "") +
+                   (checks.Any(c => c.Kind == "age") ? ", working files' ages" : "") + ")\n";
         var text = new StringBuilder($"{stale.Count} problem(s); `tool-watchdog check` for every check\n");
         foreach (var check in stale)
             text.Append("   ").Append(check.Line()).Append('\n');

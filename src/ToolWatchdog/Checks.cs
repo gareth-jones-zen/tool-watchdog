@@ -78,12 +78,13 @@ public static partial class Checks
     [GeneratedRegex(@"(20\d{2})-(\d{2})(?:-(\d{2}))?", RegexOptions.CultureInvariant)]
     private static partial Regex NameDate();
 
-    /// <summary>Every check, in the settings' order: outputs, logs, sizes, then tasks.</summary>
+    /// <summary>Every check, in the settings' order: outputs, logs, sizes, ages, then tasks.</summary>
     public static List<Check> Run(Config config, DateTime now, Func<IReadOnlyList<string>, IReadOnlyDictionary<string, TaskInfo>> taskInfo)
     {
         var checks = config.Outputs.Select(r => Output(config, r, now)).ToList();
         checks.AddRange(config.Logs.Select(r => Log(config, r, now)));
         checks.AddRange(config.Sizes.Select(r => Size(config, r)));
+        checks.AddRange(config.Ages.Select(r => Age(config, r, now)));
         if (config.Tasks is { Names.Count: > 0 } tasks)
             checks.AddRange(Tasks(tasks, now, taskInfo));
         return checks;
@@ -250,6 +251,55 @@ public static partial class Checks
             problems.Add($"over {N(maxEach)} each: " + string.Join(", ", big.Select(m => $"{m.Shown} ({N(m.Chars)})")));
         check.Stale = problems.Count > 0;
         check.Detail = problems.Count > 0 ? $"{detail}: {string.Join("; ", problems)}" : detail;
+        return check;
+    }
+
+    // ---- ages -----------------------------------------------------------------------------------------------------
+
+    /// <summary>An [[age]] (0.5.0): every file or folder the patterns match, against the oldest allowed. A folder's age is
+    /// its newest file's (its own time if it's empty), so one still being written to isn't old. Warns only.</summary>
+    public static Check Age(Config config, AgeRule rule, DateTime now)
+    {
+        var check = new Check { Kind = "age", Name = rule.Name, Tool = rule.Tool };
+        var limit = $"limit {Check.Plural(rule.Days.ToString(CultureInfo.InvariantCulture), "day")}";
+        var entries = rule.Files.SelectMany(p => Glob(p, recursive: true)).Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (entries.Count == 0)
+        {
+            check.Detail = $"nothing there ({limit})";
+            return check;
+        }
+        var aged = new List<(string Shown, DateTime When)>();
+        foreach (var entry in entries)
+        {
+            try
+            {
+                DateTime when;
+                if (Directory.Exists(entry))
+                {
+                    var inside = Directory.EnumerateFiles(entry, "*", SearchOption.AllDirectories).Select(System.IO.File.GetLastWriteTime).ToList();
+                    when = inside.Count > 0 ? inside.Max() : Directory.GetLastWriteTime(entry);
+                }
+                else
+                    when = System.IO.File.GetLastWriteTime(entry);
+                aged.Add((Shown(config, entry), when));
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // Gone or locked since it was listed: the next pass sees it.
+            }
+        }
+        var old = aged.Where(a => a.When < now.AddDays(-rule.Days)).OrderBy(a => a.When).ToList();
+        string Days(DateTime when) => $"{(int)(now - when).TotalDays}d";
+        if (old.Count > 0)
+        {
+            check.Stale = true;
+            check.Detail = $"{old.Count} of {aged.Count} older than {Check.Plural(rule.Days.ToString(CultureInfo.InvariantCulture), "day")}: " +
+                           string.Join(", ", old.Take(5).Select(a => $"{a.Shown} ({Days(a.When)})")) + (old.Count > 5 ? ", ..." : "") +
+                           (rule.Tool.Length > 0 ? $": is {rule.Tool} tidying up?" : "");
+        }
+        else
+            check.Detail = $"{aged.Count} there, the oldest {(aged.Count > 0 ? Days(aged.Min(a => a.When)) : "0d")} ({limit})";
         return check;
     }
 

@@ -31,6 +31,11 @@ public sealed record TasksRule(IReadOnlyList<string> Names, int Days, string? Re
 public sealed record SizeRule(string Name, IReadOnlyList<string> Files, long? TotalLines, long? TotalChars, long? EachChars,
     bool Required);
 
+/// <summary>An [[age]] (0.5.0): working files a tool should tidy away itself (documents downloaded, emails saved for a
+/// handler, screenshots), none of which should be older than Days. Files are globs (** any depth); a match may be a file or
+/// a folder, and a folder's age is that of the newest file in it. Nothing matching is fine: it only warns, never deletes.</summary>
+public sealed record AgeRule(string Name, string Tool, IReadOnlyList<string> Files, int Days);
+
 /// <summary>[schedule]: the hours and days that count as watched. A log is judged only inside them, and `run` (the
 /// scheduled pass) does nothing outside them.</summary>
 public sealed record Window(IReadOnlySet<DayOfWeek> Days, TimeOnly Start, TimeOnly End, string Text)
@@ -76,6 +81,12 @@ public sealed partial class Config
         "# total_chars = 20000\n" +
         "# each_chars = 15000             # any one file\n" +
         "\n" +
+        "# [[age]]                        # working files a tool should tidy away itself (warns; never deletes)\n" +
+        "# name = \"Downloaded documents\"\n" +
+        "# tool = \"my-tool\"\n" +
+        "# files = \"%LOCALAPPDATA%/my-tool/documents/*\"   # files or folders; a folder's age is its newest file's\n" +
+        "# days = 30\n" +
+        "\n" +
         "# [tasks]                        # scheduled tasks: there, enabled, run lately, last run not failed\n" +
         "# names = [\"my-tool watch\"]\n" +
         "# days = 14\n" +
@@ -88,13 +99,14 @@ public sealed partial class Config
         "# confirm_runs = 2               # `run` raises a problem only once it's been seen on this many runs in a row\n";
 
     public static readonly string[] KnownKeys =
-        ["root", "output", "log", "size", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
+        ["root", "output", "log", "size", "age", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
 
     public required string Path { get; init; }
     public required string Root { get; init; }
     public IReadOnlyList<OutputRule> Outputs { get; init; } = [];
     public IReadOnlyList<LogRule> Logs { get; init; } = [];
     public IReadOnlyList<SizeRule> Sizes { get; init; } = [];
+    public IReadOnlyList<AgeRule> Ages { get; init; } = [];
     public TasksRule? Tasks { get; init; }
     public Window Window { get; init; } = Window.Default;
     public int EveryMinutes { get; init; } = 15;
@@ -283,6 +295,25 @@ public sealed partial class Config
             sizes.Add(new SizeRule(Text(table, "name", where, required: true), files.Select(Resolve).ToList(), lines, chars, each, required));
         }
 
+        var ages = new List<AgeRule>();
+        foreach (var table in Tables("age"))
+        {
+            var where = $"[[age]] {(table.TryGetValue("name", out var n) ? n : "(no name)")}";
+            Strict(table, where, "name", "tool", "files", "days");
+            var files = table.TryGetValue("files", out var f)
+                ? f switch
+                {
+                    string { Length: > 0 } one => [one],
+                    TomlArray many when many.Count > 0 && many.All(x => x is string { Length: > 0 }) => many.Cast<string>().ToList(),
+                    _ => throw Bad(where, "files should be a pattern or a list of them"),
+                }
+                : throw Bad(where, "needs files");
+            var days = Number(table, "days", where) is { } d
+                ? d.Value >= 1 && d.Value == Math.Floor(d.Value) ? (int)d.Value : throw Bad(where, "days should be a whole number, 1 or more")
+                : throw Bad(where, "needs days, the oldest a file there may be");
+            ages.Add(new AgeRule(Text(table, "name", where, required: true), Text(table, "tool", where, fallback: ""), files.Select(Resolve).ToList(), days));
+        }
+
         TasksRule? tasks = null;
         if (raw.TryGetValue("tasks", out var t))
         {
@@ -349,6 +380,7 @@ public sealed partial class Config
             Outputs = outputs,
             Logs = logs,
             Sizes = sizes,
+            Ages = ages,
             Tasks = tasks,
             Window = window,
             EveryMinutes = every,
