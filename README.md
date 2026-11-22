@@ -100,17 +100,23 @@ total_chars = 20000
 each_chars = 15000                # any one file
 required = false                  # true: no file matching is a problem (default false)
 
+confirm_runs = 2                  # raise a problem once it's seen on this many passes in a row (1: at once)
+
 [tasks]                           # scheduled tasks: there, enabled, run within `days`, last run not failed
 names = ["mail-triage watch", "team-leave sync"]
 days = 14
 register_hint = "register-tasks.ps1"   # optional: said after "not registered"
 
-[schedule]
-days = "Mon-Fri"                  # or "Mon, Wed, Fri", "Sat-Sun", "every day"
+[tasks.settings]                  # optional (0.7.0): each task's tool settings file, to compare with its [schedule]
+"team-leave sync" = "team-leave.toml"                                  # a job
+"mail-triage watch" = { file = "mail-triage.toml", kind = "watcher" }  # a watcher
+
+[schedule]                        # background-tools-lib's shared [schedule] keys
+days = "Mon-Fri"                  # or "Mon,Wed,Fri", a list, or "every day"
 hours = "08:00-19:00"
 every_minutes = 15                # autostart: how often run runs
+at_logon = true
 after_unlock_minutes = 1          # and this long after each unlock; 0: no unlock trigger
-confirm_runs = 2                  # raise a problem once it's seen on this many passes in a row (1: at once)
 
 [review]                          # optional: where run puts its items (background-tools-lib's ReviewQueue)
 file = "%LOCALAPPDATA%/my-tools/review.json"
@@ -119,6 +125,22 @@ source = "watchdog"
 
 The file is read strictly: an unknown setting, or one of the wrong type, is an error that names it. A last task result
 of 0x41301 (running), 0x41303 (never run) or 0x41306 (stopped by a restart) isn't a failure.
+
+**`[schedule]`** (0.7.0) is background-tools-lib's shared scheduling table (WinBackground's `ScheduleSettings`), read
+by its parser: `every_minutes`, `daily_at`, `at_logon` and `after_unlock_minutes` set the watchdog's own task;
+`days`, `hours` (and `end_date`) are the hours it checks within. A change takes effect at `autostart on`, and
+`autostart status` says when the settings no longer match the registered task. `confirm_runs` is the watchdog's own,
+so it's a top-level setting; in `[schedule]` (0.6 and earlier) it's still read, but not together with the top-level one.
+
+**Schedule drift, `[tasks.settings]`** (0.7.0): name a task's tool settings file and the watchdog reads that file's
+`[schedule]`, works out its fingerprint (a job's every_minutes, daily_at, at_logon and after_unlock_minutes; a watcher
+just starts at logon) and compares it with the one the task recorded when it was registered. **Settings changed since
+then is a problem**, "settings changed since registration: run `<tool> autostart on`", raised like any other. A task
+registered before schedules were recorded, or a settings file with no `[schedule]`, gets a note in the line, not a
+problem. **Spell the tool's `[schedule]` out in full**: a key left to the tool's own default is read here as the
+library's default (`at_logon` true, `after_unlock_minutes` 0, no `every_minutes`), so a tool whose own default differs
+would look changed. Paths are relative to the watchdog's settings file; a string is a job, `{ file, kind = "watcher" }`
+a watcher.
 
 **`base`:** several tools built on the shared library can keep their common settings in one file. Its `[paths]` are
 variables for this file's paths (`%EA_LOCAL%`), and a table such as `[review]` applies only if this file has that

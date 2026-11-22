@@ -4,6 +4,7 @@ using PyCompat;
 using ReviewQueue;
 using Tomlyn;
 using Tomlyn.Model;
+using WinBackground;
 
 namespace ToolWatchdog;
 
@@ -23,7 +24,15 @@ public sealed record OutputRule(string Name, string Tool, IReadOnlyList<string> 
 public sealed record LogRule(string Name, string File, double Hours);
 
 /// <summary>[tasks]: scheduled tasks that must exist, be enabled, and have run within so many days without failing.</summary>
-public sealed record TasksRule(IReadOnlyList<string> Names, int Days, string? RegisterHint);
+public sealed record TasksRule(IReadOnlyList<string> Names, int Days, string? RegisterHint)
+{
+    /// <summary>[tasks.settings] (0.7.0): the settings file each task's [schedule] is in, to spot a task registered before its
+    /// settings changed.</summary>
+    public IReadOnlyDictionary<string, TaskLink> Settings { get; init; } = new Dictionary<string, TaskLink>();
+}
+
+/// <summary>A task's tool settings file, and whether the task is a watcher or a job (how its schedule is fingerprinted).</summary>
+public sealed record TaskLink(string File, TaskKind Kind);
 
 /// <summary>A [[size]] (0.4.0): files that must stay within a budget, in lines and characters across them all, and in
 /// characters for any one of them. Each budget is optional, but at least one is given. Files are globs, and ** matches
@@ -99,7 +108,19 @@ public sealed partial class Config
         "# confirm_runs = 2               # `run` raises a problem only once it's been seen on this many runs in a row\n";
 
     public static readonly string[] KnownKeys =
-        ["root", "output", "log", "size", "age", "tasks", "schedule", "notify", "state_file", "log_file", "review"];
+        ["root", "output", "log", "size", "age", "tasks", "schedule", "confirm_runs", "notify", "state_file", "log_file", "review"];
+
+    /// <summary>The watchdog's own [schedule] when the settings say nothing (0.7.0, as before): every 15 minutes, at logon and
+    /// a minute after each unlock, checking Mon-Fri 08:00-19:00.</summary>
+    public static readonly ScheduleSettings DefaultSchedule = new()
+    {
+        EveryMinutes = 15, AtLogon = true, AfterUnlockMinutes = 1,
+        Days = new HashSet<DayOfWeek> { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday },
+        Hours = (TimeSpan.FromHours(8), TimeSpan.FromHours(19)),
+    };
+
+    /// <summary>The task's schedule (background-tools-lib's shared [schedule]).</summary>
+    public ScheduleSettings Schedule { get; init; } = DefaultSchedule;
 
     public required string Path { get; init; }
     public required string Root { get; init; }
@@ -319,44 +340,85 @@ public sealed partial class Config
         {
             if (t is not TomlTable table)
                 throw new UsageException($"{full}: [tasks] should be a table.");
-            Strict(table, "[tasks]", "names", "days", "register_hint");
+            Strict(table, "[tasks]", "names", "days", "register_hint", "settings");
             var names = table.TryGetValue("names", out var list)
                 ? list is TomlArray a && a.All(x => x is string { Length: > 0 }) ? a.Cast<string>().ToList() : throw Bad("[tasks]", "names should be a list of task names")
                 : [];
             var days = Number(table, "days", "[tasks]")?.Value ?? 14;
-            tasks = new TasksRule(names, (int)days, table.TryGetValue("register_hint", out _) ? Text(table, "register_hint", "[tasks]") : null);
+            // [tasks.settings] (0.7.0): a task's tool settings file, so its [schedule] can be compared with the task.
+            var links = new Dictionary<string, TaskLink>(StringComparer.Ordinal);
+            if (table.TryGetValue("settings", out var sv))
+            {
+                if (sv is not TomlTable settingsTable)
+                    throw Bad("[tasks.settings]", "should be a table of task names and settings files");
+                foreach (var (task, value) in settingsTable)
+                {
+                    if (!names.Contains(task))
+                        throw Bad("[tasks.settings]", $"names '{task}', which isn't in [tasks] names");
+                    links[task] = value switch
+                    {
+                        string { Length: > 0 } file => new TaskLink(Full(file), TaskKind.Job),
+                        TomlTable inline when inline.Keys.All(k => k is "file" or "kind")
+                            && inline.TryGetValue("file", out var f) && f is string { Length: > 0 } fs => new TaskLink(Full(fs),
+                                !inline.TryGetValue("kind", out var k) ? TaskKind.Job
+                                : k is "job" ? TaskKind.Job : k is "watcher" ? TaskKind.Watcher
+                                : throw Bad("[tasks.settings]", $"'{task}': kind should be \"job\" or \"watcher\"")),
+                        _ => throw Bad("[tasks.settings]", $"'{task}' should be a settings file, or {{ file = \"x.toml\", kind = \"watcher\" }}"),
+                    };
+                }
+            }
+            tasks = new TasksRule(names, (int)days, table.TryGetValue("register_hint", out _) ? Text(table, "register_hint", "[tasks]") : null)
+            {
+                Settings = links,
+            };
         }
 
+        // [schedule]: background-tools-lib's shared keys (0.7.0). confirm_runs is the watchdog's own, so it's a top-level
+        // setting now; [schedule] confirm_runs is the old place, still read, but not with the top-level one.
+        var schedule = DefaultSchedule;
         var window = Window.Default;
-        var every = 15;
-        int? unlock = 1;
-        var confirm = 2;
+        int? confirmOld = null;
         if (raw.TryGetValue("schedule", out var s))
         {
             if (s is not TomlTable table)
                 throw new UsageException($"{full}: [schedule] should be a table.");
-            Strict(table, "[schedule]", "days", "hours", "every_minutes", "after_unlock_minutes", "confirm_runs");
-            var daysText = table.TryGetValue("days", out _) ? Text(table, "days", "[schedule]") : "Mon-Fri";
-            var hoursText = table.TryGetValue("hours", out _) ? Text(table, "hours", "[schedule]") : "08:00-19:00";
-            var m = HoursPattern().Match(hoursText);
-            if (!m.Success)
-                throw Bad("[schedule]", $"hours should be like \"08:00-19:00\", not '{hoursText}'");
-            TimeOnly Clock(string h, string mm) => int.Parse(h, CultureInfo.InvariantCulture) == 24
-                ? TimeOnly.MaxValue : new TimeOnly(int.Parse(h, CultureInfo.InvariantCulture), int.Parse(mm, CultureInfo.InvariantCulture));
-            var (start, end) = (Clock(m.Groups[1].Value, m.Groups[2].Value), Clock(m.Groups[3].Value, m.Groups[4].Value));
-            if (end <= start)
-                throw Bad("[schedule]", "hours should end after they start");
-            window = new Window(ParseDays(daysText) ?? throw Bad("[schedule]", $"days should be like \"Mon-Fri\" or \"Mon, Wed, Fri\", not '{daysText}'"),
-                start, end, $"{daysText} {hoursText}");
-            if (Number(table, "every_minutes", "[schedule]") is { } e)
-                every = e.Value >= 1 && e.Value == Math.Floor(e.Value) ? (int)e.Value : throw Bad("[schedule]", "every_minutes should be a whole number, 1 or more");
-            if (Number(table, "after_unlock_minutes", "[schedule]") is { } u)
-                unlock = u.Value >= 0 && u.Value == Math.Floor(u.Value)
-                    ? (u.Value == 0 ? null : (int)u.Value)   // 0: no unlock trigger (0.6.0; before, 0 meant "straight after")
-                    : throw Bad("[schedule]", "after_unlock_minutes should be a whole number, 0 (no unlock trigger) or more");
+            var shared = new TomlTable();
+            foreach (var (key, value) in table)
+                if (key != "confirm_runs" && !(key == "days" && value is string everyDay && everyDay.Trim().Equals("every day", StringComparison.OrdinalIgnoreCase)))
+                    shared[key] = value;
+            var allDays = table.TryGetValue("days", out var dv) && dv is string dt && dt.Trim().Equals("every day", StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                schedule = ScheduleSettings.Parse(shared, DefaultSchedule, TaskKind.Job, $"{full}: [schedule]");
+            }
+            catch (FormatException error)
+            {
+                throw new UsageException(error.Message.TrimEnd());
+            }
+            if (allDays)
+                schedule = schedule with { Days = null };
+            if (schedule.Hours is { } h && h.To <= h.From)
+                throw Bad("[schedule]", "hours should end after they start (the watchdog's window can't run past midnight)");
             if (Number(table, "confirm_runs", "[schedule]") is { } c)
-                confirm = c.Value >= 1 && c.Value == Math.Floor(c.Value) ? (int)c.Value : throw Bad("[schedule]", "confirm_runs should be a whole number, 1 or more");
+                confirmOld = c.Value >= 1 && c.Value == Math.Floor(c.Value) ? (int)c.Value : throw Bad("[schedule]", "confirm_runs should be a whole number, 1 or more");
+            var daysText = table.ContainsKey("days") ? (table["days"] is string ds ? ds : string.Join(", ", ((TomlArray)table["days"]).Cast<string>())) : "Mon-Fri";
+            var hoursText = table.TryGetValue("hours", out var hv) && hv is string hs ? hs : "08:00-19:00";
+            var (from, to) = schedule.Hours ?? (TimeSpan.FromHours(8), TimeSpan.FromHours(19));
+            window = new Window(schedule.Days is { } sd ? new HashSet<DayOfWeek>(sd) : [.. Enum.GetValues<DayOfWeek>()],
+                TimeOnly.FromTimeSpan(from), to >= TimeSpan.FromHours(24) ? TimeOnly.MaxValue : TimeOnly.FromTimeSpan(to), $"{daysText} {hoursText}");
         }
+        var confirm = 2;
+        if (raw.ContainsKey("confirm_runs"))
+        {
+            if (confirmOld is not null)
+                throw new UsageException($"{full}: confirm_runs is set both at the top and in [schedule]: keep the top-level one ([schedule] is the old place).");
+            confirm = Number(raw, "confirm_runs", "confirm_runs") is { } top && top.Value >= 1 && top.Value == Math.Floor(top.Value)
+                ? (int)top.Value : throw new UsageException($"{full}: confirm_runs should be a whole number, 1 or more.");
+        }
+        else if (confirmOld is { } old)
+            confirm = old;
+        var every = schedule.EveryMinutes ?? 15;
+        int? unlock = schedule.AfterUnlockMinutes > 0 ? schedule.AfterUnlockMinutes : null;
 
         ReviewSettings? review = null;
         if (raw.TryGetValue("review", out var r))
@@ -385,6 +447,7 @@ public sealed partial class Config
             Ages = ages,
             Tasks = tasks,
             Window = window,
+            Schedule = schedule,
             EveryMinutes = every,
             AfterUnlockMinutes = unlock,
             ConfirmRuns = confirm,

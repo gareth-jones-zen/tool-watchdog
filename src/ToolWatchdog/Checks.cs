@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using PyCompat;
+using Tomlyn.Model;
 using WinBackground;
 
 namespace ToolWatchdog;
@@ -65,7 +67,7 @@ public sealed class Check
 }
 
 /// <summary>A task's state as Task Scheduler reports it: Ready, Running, Disabled..., when it last ran, and the result.</summary>
-public sealed record TaskInfo(string State, DateTime? Last, long Result);
+public sealed record TaskInfo(string State, DateTime? Last, long Result, string? Description = null);
 
 public static partial class Checks
 {
@@ -467,7 +469,7 @@ public static partial class Checks
                      $"foreach ($n in @({quoted})) {{ try {{ $t = $root.GetTask($n) }} catch {{ continue }}; " +
                      "$out[$n] = @{ state = $states[[int]$t.State]; " +
                      "last = if ($t.LastRunTime.Year -gt 2000) { $t.LastRunTime.ToString('s') } else { $null }; " +
-                     "result = [int64]$t.LastTaskResult } }; $out | ConvertTo-Json -Compress";
+                     "result = [int64]$t.LastTaskResult; description = $t.Definition.RegistrationInfo.Description } }; $out | ConvertTo-Json -Compress";
         var done = Shell.PowerShell(script, 90);
         if (done.ExitCode != 0)
             throw new InvalidOperationException((done.StandardError.Length > 0 ? done.StandardError : done.StandardOutput).Trim() is var t && t.Length > 300 ? t[..300] : t);
@@ -486,7 +488,8 @@ public static partial class Checks
             DateTime? last = task["last"] is JsonValue lv && lv.TryGetValue<string>(out var text)
                 && DateTime.TryParseExact(text, "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var at) ? at : null;
             var code = task["result"] is JsonValue rv && rv.TryGetValue<long>(out var r) ? r : 0;
-            result[name] = new TaskInfo(task["state"]?.GetValue<string>() ?? "Unknown", last, code);
+            var description = task["description"] is JsonValue dv && dv.TryGetValue<string>(out var d) ? d : null;
+            result[name] = new TaskInfo(task["state"]?.GetValue<string>() ?? "Unknown", last, code, description);
         }
         return result;
     }
@@ -526,14 +529,49 @@ public static partial class Checks
                     problems.Add("never run");
                 else if (Math.Floor((now - last).TotalDays) > rule.Days)
                     problems.Add($"not run since {last.ToString("dd MMM", CultureInfo.InvariantCulture)}");
+                string? problem = null, note = null;
+                if (rule.Settings.TryGetValue(name, out var link))
+                    (problem, note) = Drift(link, task, check.Tool);
+                if (problem is not null)
+                    problems.Add(problem);
                 check.Stale = problems.Count > 0;
                 check.HasNewest = true;
                 check.Newest = task.Last;
-                check.Detail = problems.Count > 0 ? string.Join("; ", problems)
-                    : $"{task.State.ToLowerInvariant()}, last run {task.Last!.Value.ToString("ddd dd MMM HH:mm", CultureInfo.InvariantCulture)}";
+                check.Detail = (problems.Count > 0 ? string.Join("; ", problems)
+                    : $"{task.State.ToLowerInvariant()}, last run {task.Last!.Value.ToString("ddd dd MMM HH:mm", CultureInfo.InvariantCulture)}")
+                    + (note is null ? "" : $" ({note})");
             }
             checks.Add(check);
         }
         return checks;
+    }
+
+    /// <summary>A task against its tool's [schedule] (0.7.0): a problem when the settings changed since it was registered;
+    /// a note when it can't be compared (registered before schedules were recorded, or no [schedule] to compare with).
+    /// The tool's settings should spell its [schedule] out in full: a key left to the tool's own default is read here as
+    /// background-tools-lib's default.</summary>
+    internal static (string? Problem, string? Note) Drift(TaskLink link, TaskInfo task, string tool)
+    {
+        ScheduleSettings settings;
+        try
+        {
+            var text = PyStr.ReadText(link.File);
+            if (text.StartsWith('﻿'))
+                text = text[1..];
+            if (!PyToml.Read(text, link.File).TryGetValue("schedule", out var s) || s is not TomlTable table)
+                return (null, $"{Path.GetFileName(link.File)} has no [schedule], so its schedule isn't compared");
+            settings = ScheduleSettings.Parse(table, new ScheduleSettings(), link.Kind, $"{link.File}: [schedule]");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or FormatException or Tomlyn.TomlException)
+        {
+            return ($"couldn't read its [schedule]: {error.Message.TrimEnd()}", null);
+        }
+        var status = new Dictionary<string, string> { ["description"] = task.Description ?? "" };
+        return ScheduleDrift.Check(status, settings.Fingerprint(link.Kind)) switch
+        {
+            DriftState.Changed => ($"settings changed since registration: run `{tool} autostart on`", null),
+            DriftState.Unknown => (null, $"registered before its schedule was recorded: `{tool} autostart on` records it"),
+            _ => (null, null),
+        };
     }
 }

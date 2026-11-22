@@ -211,14 +211,7 @@ public static class Cli
             case "on":
                 var background = Path.Combine(host.ProgramDir, BackgroundExe);
                 var exe = File.Exists(background) ? background : Path.Combine(host.ProgramDir, "tool-watchdog.exe");
-                var schedule = new TaskSchedule
-                {
-                    AtLogon = true,
-                    Every = TimeSpan.FromMinutes(config.EveryMinutes),
-                    AfterUnlock = config.AfterUnlockMinutes is { } u ? TimeSpan.FromMinutes(u) : null,
-                    KeepRunning = false,
-                    TimeLimit = TimeSpan.FromMinutes(5),
-                };
+                var schedule = config.Schedule.ToTaskSchedule(TaskKind.Job, TimeSpan.FromMinutes(5));
                 var line = task.Enable(exe, ["--config", config.Path, "run"], Path.GetDirectoryName(config.Path), schedule);
                 host.Out.WriteLine($"Autostart is on: '{TaskName}' runs every {config.EveryMinutes} minutes, at logon" +
                                    (config.AfterUnlockMinutes is { } m ? $" and {m} minute(s) after each unlock" : "") +
@@ -247,6 +240,8 @@ public static class Cli
                     host.Out.WriteLine($"Autostart is on ('{TaskName}').");
                     foreach (var name in new[] { "state", "last_run", "last_result", "next_run", "command" })
                         host.Out.WriteLine($"  {name.Replace('_', ' '),-12} {info.GetValueOrDefault(name, "")}");
+                    if (ScheduleDrift.Advice(ScheduleDrift.Check(info, config.Schedule.Fingerprint(TaskKind.Job)), Prog) is { } advice)
+                        host.Out.WriteLine($"  {advice}");
                 }
                 return 0;
         }
