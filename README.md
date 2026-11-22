@@ -60,6 +60,7 @@ tool-watchdog config             create the settings file (if missing) and say w
 - **Why a scheduled job rather than a watcher:** a watcher that stops or hangs goes quiet, and noticing that is this
   tool's job. A job starts afresh every time, Task Scheduler records each run, and the unlock trigger catches up after
   sleep (waking always ends in an unlock, and a repetition trigger may skip runs missed while asleep).
+  `after_unlock_minutes = 0` registers no unlock trigger (0.6.0): the next repetition then catches up instead.
 
 `check` runs every check whatever the time; only logs are judged by the watched hours (a log quiet overnight isn't a
 problem).
@@ -108,7 +109,7 @@ register_hint = "register-tasks.ps1"   # optional: said after "not registered"
 days = "Mon-Fri"                  # or "Mon, Wed, Fri", "Sat-Sun", "every day"
 hours = "08:00-19:00"
 every_minutes = 15                # autostart: how often run runs
-after_unlock_minutes = 1          # and this long after each unlock
+after_unlock_minutes = 1          # and this long after each unlock; 0: no unlock trigger
 confirm_runs = 2                  # raise a problem once it's seen on this many passes in a row (1: at once)
 
 [review]                          # optional: where run puts its items (background-tools-lib's ReviewQueue)

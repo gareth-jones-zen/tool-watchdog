@@ -294,9 +294,32 @@ public sealed class WatchdogTests : IDisposable
         Assert.Equal((TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(2), false), (schedule.Every, schedule.AfterUnlock, schedule.KeepRunning));
     }
 
+    [Fact]
+    public void After_unlock_minutes_0_registers_no_unlock_trigger()
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + "\n[schedule]\nevery_minutes = 15\nafter_unlock_minutes = 0\n");
+        Assert.Null(Config.AfterUnlockMinutes);
+        var (code, output) = Run("autostart", "on");
+        Assert.Equal(0, code);
+        Assert.Contains("every 15 minutes, at logon,", output);
+        Assert.DoesNotContain("unlock", output);
+        var (_, _, schedule) = Assert.Single(task.Enabled);
+        Assert.True(schedule.AtLogon);
+        Assert.Equal(TimeSpan.FromMinutes(15), schedule.Every);
+        Assert.Null(schedule.AfterUnlock);
+    }
+
+    [Fact]
+    public void After_unlock_minutes_defaults_to_1()
+    {
+        File.WriteAllText(Path.Combine(dir, "config.toml"), Settings + "\n[schedule]\nevery_minutes = 15\n");
+        Assert.Equal(1, Config.AfterUnlockMinutes);
+    }
+
     [Theory]
     [InlineData("[schedule]\nhours = \"19:00-08:00\"", "hours should end after they start")]
     [InlineData("[schedule]\ndays = \"Funday\"", "days should be like")]
+    [InlineData("[schedule]\nafter_unlock_minutes = -1", "after_unlock_minutes should be a number, 0 or more")]
     [InlineData("[[output]]\nname = \"x\"\nfiles = \"a\"\ndays = 1\nhours = 2", "one of hours, working_days or days")]
     [InlineData("[[output]]\nname = \"x\"\nfiles = \"a\"\ndate = \"when\"", "date should be name, modified or json:<field>")]
     [InlineData("[[log]]\nname = \"x\"\nfile = \"a\"\nwhen = 1", "unknown setting 'when'")]

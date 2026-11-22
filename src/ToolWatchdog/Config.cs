@@ -95,7 +95,7 @@ public sealed partial class Config
         "# days = \"Mon-Fri\"\n" +
         "# hours = \"08:00-19:00\"\n" +
         "# every_minutes = 15             # autostart: how often `run` runs\n" +
-        "# after_unlock_minutes = 1       # and this long after each unlock (catches up after sleep)\n" +
+        "# after_unlock_minutes = 1       # and this long after each unlock (catches up after sleep); 0: no unlock trigger\n" +
         "# confirm_runs = 2               # `run` raises a problem only once it's been seen on this many runs in a row\n";
 
     public static readonly string[] KnownKeys =
@@ -351,7 +351,9 @@ public sealed partial class Config
             if (Number(table, "every_minutes", "[schedule]") is { } e)
                 every = e.Value >= 1 && e.Value == Math.Floor(e.Value) ? (int)e.Value : throw Bad("[schedule]", "every_minutes should be a whole number, 1 or more");
             if (Number(table, "after_unlock_minutes", "[schedule]") is { } u)
-                unlock = u.Value == Math.Floor(u.Value) ? (int)u.Value : throw Bad("[schedule]", "after_unlock_minutes should be a whole number");
+                unlock = u.Value >= 0 && u.Value == Math.Floor(u.Value)
+                    ? (u.Value == 0 ? null : (int)u.Value)   // 0: no unlock trigger (0.6.0; before, 0 meant "straight after")
+                    : throw Bad("[schedule]", "after_unlock_minutes should be a whole number, 0 (no unlock trigger) or more");
             if (Number(table, "confirm_runs", "[schedule]") is { } c)
                 confirm = c.Value >= 1 && c.Value == Math.Floor(c.Value) ? (int)c.Value : throw Bad("[schedule]", "confirm_runs should be a whole number, 1 or more");
         }
